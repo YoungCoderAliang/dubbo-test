@@ -1,0 +1,134 @@
+Title: Dubbo协议+Netty4传输+zookeeper注册，注册过程
+spring~SimpleApplicationEventMulticaster->ServiceBean: onApplicationEvent
+ServiceBean->ServiceBean: doExportUrls
+ServiceBean->ServiceBean: doExportUrlsFor1Protocol
+ServiceBean-->RegistryProtocol: export
+Note over ServiceBean,RegistryProtocol: 由dubbo扩展机制wrapper机制\nProtocolFilterWrapper和\nProtocolListenerWrapper装饰
+RegistryProtocol->FailbackRegistry: register
+Note over RegistryProtocol,FailbackRegistry: Registry是与注册中心一一对应的\n它们缓存在AbstractRegistryFactory中
+FailbackRegistry->ZookeeperRegistry: doRegister
+Note over ZookeeperRegistry: 在/dubbo/接口名/providers/下新增一个子节点，\n节点名即dubbo的URL对象toString
+RegistryProtocol->FailbackRegistry: subscribe
+FailbackRegistry->ZookeeperRegistry: doSubscribe
+Note over ZookeeperRegistry: 监听/dubbo/接口名/configurators\n在dubbo-admin修改动态配置会触发\n可以修改的参数就是url中的参数
+ZookeeperRegistry-->ZookeeperRegistry: notify（如果配置发生变化）
+ZookeeperRegistry->RegistryProtocol.OverrideListener: notify
+
+
+
+Title: Dubbo协议+Netty4传输，接口绑定过程
+spring~SimpleApplicationEventMulticaster->ServiceBean: onApplicationEvent
+ServiceBean->ServiceBean: doExportUrls
+ServiceBean->ServiceBean: doExportUrlsFor1Protocol
+ServiceBean-->RegistryProtocol: export
+Note over ServiceBean,RegistryProtocol: 由dubbo扩展机制wrapper机制\nProtocolFilterWrapper和\nProtocolListenerWrapper装饰
+RegistryProtocol->RegistryProtocol: doLocalExport
+RegistryProtocol-->DubboProtocol: export
+Note over RegistryProtocol,DubboProtocol: 由dubbo扩展机制wrapper机制\nProtocolFilterWrapper和\nProtocolListenerWrapper装饰\n并构造执行链
+DubboProtocol->DubboProtocol: exporterMap.put(key, exporter)
+DubboProtocol->DubboProtocol: openServer
+Note over DubboProtocol: openServer方法中会先查看\n内存中是否存在相同的ip:port\n为key缓存的ExchangeServer
+DubboProtocol->DubboProtocol: createServer
+DubboProtocol->Exchangers: bind
+Exchangers->HeaderExchanger: bind
+note over Exchangers,HeaderExchanger: 这里会使用HeaderExchangerServer装饰\n具体的NettyServer，HeaderExchangerServer\n会异步定时处理心跳，调用的都是NettyServer\n提供的接口：server.getChannels()\n定时心跳任务默认不会开启，除非protocol中\n有配置heartbeat参数\nServer端对于心跳超时的处理是关闭连接\n连接过程HeaderExchangerClient也会装饰NettyClient\n Client端对于心跳超时的处理是重连
+HeaderExchanger->Transporters: bind
+Transporters-->NettyTransporter: bind
+NettyTransporter->NettyServer: doOpen
+NettyServer->netty~ServerBootstrap: bind
+
+Note over Transporters,NettyTransporter: 动态编译源码，编译代码在\nExtensionLoader.getAdaptiveExtension\nExtensionLoader.createAdaptiveExtensionClassCode\n例如Transporter类传进去，会构造一个从url读取\n传输协议，如果读取不到，使用 Transporter 注解\nnetty来作为默认值的 Transporter 实现类
+
+
+
+
+Title: Dubbo协议+Netty4传输，服务响应过程
+NettyServer-->NettyHandler: messageReceived
+NettyHandler->AbstractPeer: received
+AbstractPeer->MultiMessageHandler: received
+MultiMessageHandler->HeartbeatHandler: received
+HeartbeatHandler->AllChannelHandler: received
+AllChannelHandler-->ChannelEventRunnable: run
+Note over AllChannelHandler: 默认线程池\nWrappedChannelHandler.SHARED_EXECUTOR
+ChannelEventRunnable->DecodeHandler: received
+DecodeHandler->HeaderExchangeHandler: received
+HeaderExchangeHandler->DubboProtocol.requestHandler: reply
+DubboProtocol.requestHandler->DubboProtocol: getInvoker
+Note over DubboProtocol:exporterMap中缓存了以\n“test.dubbo.demo.ISayHi:20880”\n-Exporter的映射关系
+DubboProtocol.requestHandler->ProtocolFilterWrapper.Invoker: invoke
+Note over ProtocolFilterWrapper.Invoker: EchoFilter-ClassLoaderFilter\n-GenericFilter-ContextFilter\n-TraceFilter-TimeoutFilter\n-MonitorFilter-ExceptionFilter
+ProtocolFilterWrapper.Invoker->AbstractProxyInvoker: invoke
+HeaderExchangeHandler->NettyChannel: send
+
+
+
+
+Title: Dubbo协议+Netty4传输，服务引用
+DubboNamespaceHandler-->DubboBeanDefinitionParser: add
+DubboBeanDefinitionParser-->ReferenceBean: register
+Note over DubboBeanDefinitionParser,ReferenceBean: 增加 dubbo:reference 标签\n解析器与工厂类
+ReferenceBean->ReferenceBean: getObject
+ReferenceBean->ReferenceConfig: init
+Note over ReferenceConfig: 处理各种配置信息\n如果不配置直连模式，那么在reference配置中\n是没有具体的通信协议的，需要去注册中心查询\n所以会将协议设置成registry，应用扩展机制\n通过RegistryProtocol去注册中心查询并触发通道建立 
+ReferenceConfig->RegistryProtocol: refer
+Note over ReferenceConfig,RegistryProtocol: 由dubbo扩展机制wrapper机制\nProtocolFilterWrapper和\nProtocolListenerWrapper装饰
+RegistryProtocol->RegistryProtocol: doRefer
+RegistryProtocol->RegistryDirectory: subscribe
+RegistryDirectory->FailbackRegistry: subscribe
+FailbackRegistry->ZookeeperRegistry: doSubscribe
+Note over ZookeeperRegistry: 在ZookeeperRegistry会监听注册中心变化\n并在此时返回注册中心已有的数据
+ZookeeperRegistry-->RegistryDirectory: refreshInvoker
+Note over RegistryDirectory: 经过若干调用后，刷新RegistryDirectory\n中缓存的Invoker映射表\n这个映射表也是后续查找服务者的基础
+RegistryDirectory->RegistryDirectory: toInvokers
+RegistryDirectory-->DubboProtocol: refer
+Note over RegistryDirectory,DubboProtocol: 由dubbo扩展机制wrapper机制\nProtocolFilterWrapper和\nProtocolListenerWrapper装饰\n并构造Filter执行链
+DubboProtocol->DubboProtocol: initClient
+DubboProtocol->Exchangers: connect
+Exchangers->HeaderExchanger: connect
+HeaderExchanger->Transporters: connect
+Transporters->NettyTransporter: connect
+NettyTransporter->NettyClient: NettyClient
+NettyClient->ChannelHandlers: wrapInternal
+Note over NettyClient,ChannelHandlers: 初始化响应处理过程
+NettyClient->NettyClient: doOpen
+NettyClient->NettyClient: doConnect
+RegistryProtocol->Cluster$Adapter: join
+Note over RegistryProtocol: RegistryDirectory缓存Invoker列表\nCluster$Adapter返回一个调度Invoker列表的Invoker装饰\nCluster也有wrapper实现：MockClusterWrapper\n因此最终的包裹关系是MockClusterInvoker-AbstractClusterInvoker
+ReferenceConfig->JdkProxyFactory: getProxy
+JdkProxyFactory->InvokerInvocationHandler: add InvokeHandler
+
+
+
+
+Title: Dubbo协议+Netty4传输，服务激活
+InvokerInvocationHandler->MockClusterInvoker: invoke
+MockClusterInvoker->AbstractClusterInvoker: invoke
+AbstractClusterInvoker-->RegistryDirectory: doList
+Note over RegistryDirectory: 从RegistryDirectory缓存的映射表中获取Invoker列表
+Note over AbstractClusterInvoker: 获取负载均衡器
+AbstractClusterInvoker->FailoverClusterInvoker: doInvoke
+Note over FailoverClusterInvoker: 执行请求失败策略
+FailoverClusterInvoker->InvokerDelegete: invoke
+InvokerDelegete->ProtocolFilterWrapper.Invoker: invoke
+Note over ProtocolFilterWrapper.Invoker: ConsumerContextFilter-FutureFilter-MonitorFilter
+ProtocolFilterWrapper.Invoker->DubboInvoker: invoke
+DubboInvoker->HeaderExchangeClient: request
+HeaderExchangeClient->HeaderExchangeChannel: request
+HeaderExchangeChannel->NettyChannel: send
+DubboInvoker->ResponseFuture: get（同步请求情况下）
+
+
+
+Title: Dubbo协议+Netty传输，netty部分初始化与dubbo响应处理
+NettyHandler->NettyClient: received
+NettyClient->MultiMessageHandler: received
+Note over NettyClient,MultiMessageHandler: handler处理链构造参考NettyClient\n构造器调用ChannelHandlers.wrapInternal
+MultiMessageHandler->HeartbeatHandler: received
+HeartbeatHandler->AllChannelHandler: received
+AllChannelHandler-->ChannelEventRunnable: run
+ChannelEventRunnable->DecodeHandler: received
+DecodeHandler->HeaderExchangeHandler: received
+HeaderExchangeHandler->HeaderExchangeHandler: handleResponse
+HeaderExchangeHandler->DefaultFuture: received
+Note over DefaultFuture: Request.INVOKE_ID保存一个从0开始增长的id\n用来在channel中关联请求与响应，区分不同的请求\nDefaultFuture中缓存了监听器用于接收响应\n同时被上层get结果
+DefaultFuture->DefaultFuture: doReceived
